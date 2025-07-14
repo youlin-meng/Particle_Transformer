@@ -175,11 +175,10 @@ mask_test = mask_test.to(device)
 
 # y_pred, attn_weights = evaluate_model(model, x_test, y_test, mask_test)
 
-print("Kinematic analysis...")
+print("Kinematic plots")
 results = evaluate_model(model, x_test, y_test, mask_test)
 kinematic_df = analyze_kinematics_after_cuts(results, score_cut=0.5)
 
-# You can also analyze different score cuts:
 for cut in [0.5, 0.7, 0.9]:
     _ = analyze_kinematics_after_cuts(results, score_cut=cut)
 
@@ -187,7 +186,7 @@ for cut in [0.5, 0.7, 0.9]:
 # plot_attention_weights(x_test[:5].cpu(), attn_weights[:5], "results/attention_weights.png")
 # print(f"Saved attention weights visualization to results/attention_weights.png")
 
-print("Plotting performance curves...")
+print("Performance curves")
 plot_training_loss_curve(train_losses, val_losses)
 plot_score_distribution(y_test, results['y_pred'])
 plot_roc_curve(y_test, results['y_pred'])
