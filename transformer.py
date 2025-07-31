@@ -3,6 +3,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+
+class DNN(nn.Module):
+    def __init__(self, input_size, num_classes=1):
+        super(DNN, self).__init__()
+        self.fc1 = nn.Linear(input_size, 128)
+        # self.bn1 = nn.BatchNorm1d(128)
+        self.dropout1 = nn.Dropout(0.3)
+        self.fc2 = nn.Linear(128, 64)
+        # self.bn2 = nn.BatchNorm1d(64)
+        self.dropout2 = nn.Dropout(0.3)
+        self.fc3 = nn.Linear(64, 32)
+        # self.bn3 = nn.BatchNorm1d(32)
+        self.dropout3 = nn.Dropout(0.3)
+        self.fc4 = nn.Linear(32, num_classes)
+
+    def forward(self, x, mask=None):
+        # Flatten input: [batch, particles, features] -> [batch, particles*features]
+        batch_size = x.shape[0]
+        x = x.view(batch_size, -1)
+        
+        # Forward pass (returns logits, attention=None)
+        # x = F.relu(self.bn1(self.fc1(x)))
+        x = F.relu(self.fc1(x))
+        x = self.dropout1(x)
+        x = F.relu(self.fc2(x))
+        x = self.dropout2(x)
+        x = F.relu(self.fc3(x))
+        x = self.dropout3(x)
+        logits = self.fc4(x)
+        
+        return logits, None
+
+
 class MLP(nn.Module):
     def __init__(self, input_dim, hidden_units, dropout_rate, return_to_input_dim=True):
         super().__init__()
@@ -64,14 +97,22 @@ class TransformerEncoderMHSA(nn.Module):
         return x
 
 class PartClassifier(nn.Module):
-    def __init__(self, max_particles=13, n_channels=6, embed_dim=64, num_heads=8,
+    def __init__(self, max_particles=13, n_channels=7, embed_dim=64, num_heads=8,
                  num_transformers=3, mlp_units=[128, 64], mlp_head_units=[128, 64],
                  num_classes=1, dropout_rate=0.3):
         super().__init__()
         
         # Input embedding
+        
+        self.input_norm = nn.LayerNorm(embed_dim)
+
         self.input_projection = nn.Linear(n_channels, embed_dim)
-        self.pos_embedding = nn.Parameter(torch.randn(1, max_particles, embed_dim))
+        
+        self.pad_embedding = nn.Parameter(torch.randn(1, 1, embed_dim, dtype=torch.float32) * 0.02)
+        
+        # # Positional embedding
+        # self.pos_embedding = nn.Parameter(torch.randn(1, max_particles, embed_dim))
+        
         self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
         
         # Transformer layers
@@ -115,9 +156,18 @@ class PartClassifier(nn.Module):
         # Create key_padding_mask for attention (True = ignore position)
         key_padding_mask = ~src_mask  # True for padding, False for real particles
   
+        # x_processed = x.clone()
+        # x_processed[~src_mask] = -1.0
+        
         x_processed = x.clone()
-        x_processed[~src_mask] = 0.0 
-        x_embedded = self.input_projection(x_processed) + self.pos_embedding
+        x_embedded = self.input_projection(x_processed)
+        if hasattr(self, 'pad_embedding'):
+            pad_embeddings = self.pad_embedding.expand_as(x_embedded).to(x_embedded.dtype)
+            x_embedded[~src_mask] = pad_embeddings[~src_mask]
+        
+        # # Positional embedding
+        # x_embedded = self.input_norm(self.input_projection(x_processed) + self.pos_embedding)
+        x_embedded = self.input_norm(self.input_projection(x_processed))
         
         # Add CLS token
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
@@ -138,31 +188,41 @@ class PartClassifier(nn.Module):
         cls_output = x[:, 0]  # Extract CLS token
         logits = self.classifier(cls_output)
         
-        # Process attention weights - extract attention TO cls FROM particles
         if attn_weights is not None:
             particle_attention = attn_weights[:, 0, 1:]  # [batch, particles]
             particle_attention = particle_attention * src_mask.float()
             
-            real_particle_sums = src_mask.float().sum(dim=1, keepdim=True)
-            particle_attention = particle_attention / (real_particle_sums + 1e-8)
+            # real_particle_sums = src_mask.float().sum(dim=1, keepdim=True)
+            # particle_attention = particle_attention / (real_particle_sums + 1e-8)
 
         else:
             particle_attention = torch.zeros(batch_size, x.size(1)-1, device=x.device)
         
         return logits, particle_attention
 
-def create_part_classifier(max_particles=13, n_channels=6, embed_dim=64, num_heads=8,
-                          num_transformers=3, mlp_head_units=[128, 64], mlp_units=[128, 64],
+def create_part_classifier(model_type='transformer', max_particles=13, n_channels=7, 
+                          embed_dim=64, num_heads=8, num_transformers=3, 
+                          mlp_units=[128, 64], mlp_head_units=[128, 64], 
                           num_classes=1, dropout_rate=0.3):
+    if model_type == 'transformer':
+        return PartClassifier(
+            max_particles=max_particles,
+            n_channels=n_channels,
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            num_transformers=num_transformers,
+            mlp_head_units=mlp_head_units,
+            mlp_units=mlp_units,
+            num_classes=num_classes,
+            dropout_rate=dropout_rate
+        )
+    elif model_type == 'dnn':
+        input_size = max_particles * n_channels
+        return DNN(input_size=input_size, num_classes=num_classes)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
     
-    return PartClassifier(
-        max_particles=max_particles,
-        n_channels=n_channels,
-        embed_dim=embed_dim,
-        num_heads=num_heads,
-        num_transformers=num_transformers,
-        mlp_head_units=mlp_head_units,
-        mlp_units=mlp_units,
-        num_classes=num_classes,
-        dropout_rate=dropout_rate
-    )
+    
+    
+    
+    

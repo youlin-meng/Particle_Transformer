@@ -23,8 +23,8 @@ echo "Job name: $SLURM_JOB_NAME"
 echo "Node: $SLURM_NODELIST"
 echo "Start time: $(date)"
 
-# Run your Python script
-echo "Running the program..."
-python run.py
+# Run Optuna optimization
+echo "Running hyperparameter optimization..."
+python optuna_tuning.py
 
-echo "Program completed at: $(date)"
+echo "Optimization completed at: $(date)"

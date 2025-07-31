@@ -2,24 +2,34 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.utils import shuffle
+from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import os
+from sklearn.metrics import roc_curve, auc
 
-def convert_to_cartesian(pt, eta, phi, mass, is_bjet=0, is_jet=0):
-    if pt == -99:  # Pad with -99
-        return np.array([-99, -99, -99, -99, -99, -99])
+def convert_to_cartesian(pt, eta, phi, mass, b_tag):
     
     px = pt * np.cos(phi)
     py = pt * np.sin(phi)
     pz = pt * np.sinh(eta)
     energy = np.sqrt(px**2 + py**2 + pz**2 + mass**2)
-    return np.array([px, py, pz, energy, float(is_bjet), float(is_jet)])
+    # return np.array([px, py, pz, energy, float(jet_tag), float(lep_tag)])
+    # return np.array([px, py, pz, energy, float(b_tag)])
+    
+    # Add log transforms for better scaling
+    log_pt = np.log(pt + 1e-8)
+    log_energy = np.log(energy + 1e-8)
+    
+    return np.array([px, py, pz, log_energy])
 
-def select_particles(data, max_particles=13):
-    """Select particles while preserving original -99 padding"""
-    n_events = len(data['el_pt_0'])
-    particles = np.full((n_events, max_particles, 6), -99)  # Initialize with -99
+def select_particles(data, max_particles, n_channels):
+    n_events = len(data['jet_pt_0'])
+            
+    jet_columns = [col for col in data.columns if col.startswith('jet_pt_')]
+    max_jets = len(jet_columns)
+    
+    particles = np.full((n_events, max_particles, n_channels), -99)
     
     for i in range(n_events):
         features = []
@@ -27,42 +37,49 @@ def select_particles(data, max_particles=13):
         # Leptons (electrons/muons)
         for prefix in ['el', 'mu']:
             for j in [0, 1]:
-                pt_key = f'{prefix}_pt_{j}'
-                if data[pt_key][i] != -99:
-                    mass = 0.000511 if prefix == 'el' else 0.105658
+                if data[f'{prefix}_pt_{j}'][i] != -99:
                     features.append(convert_to_cartesian(
-                        data[pt_key][i], 
+                        data[f'{prefix}_pt_{j}'][i], 
                         data[f'{prefix}_eta_{j}'][i],
                         data[f'{prefix}_phi_{j}'][i],
-                        mass,
-                        is_bjet=0,
-                        is_jet=0
+                        data[f'{prefix}_mass_{j}'][i],
+                        # particle_type=1 #lepton
+                        b_tag=0
                     ))
+                else:
+                    features.append(np.array([-99] * n_channels))
         
-        # Jets (with b-tagging)
-        for j in range(18):
-            pt_key = f'jet_pt_{j}'
-            if data[pt_key][i] != -99:
+        # Jets
+        for j in range(max_jets):
+            if data[f'jet_pt_{j}'][i] != -99:
+                if int(data[f'jet_btag_{j}'][i]) == 1:
+                    _particle_type=3
+                    _btag=1
+                else:
+                    _particle_type=2
+                    _btag=0
                 features.append(convert_to_cartesian(
-                    data[pt_key][i],
+                    data[f'jet_pt_{j}'][i],
                     data[f'jet_eta_{j}'][i],
                     data[f'jet_phi_{j}'][i],
                     data[f'jet_mass_{j}'][i],
-                    is_bjet=data.get(f'jet_btag_{j}', [0]*n_events)[i],
-                    is_jet=1
+                    b_tag = _btag
+                    # particle_type=_particle_type  # 2 for non-btagged, 3 for btagged
                 ))
+            else:
+                features.append(np.array([-99] * n_channels))
         
         # Sort by pt and store (leaving padding as -99)
-        features.sort(key=lambda x: np.sqrt(x[0]**2 + x[1]**2), reverse=True)
-        for j, feat in enumerate(features[:max_particles]):
-            particles[i, j] = feat
+        # features.sort(key=lambda x: np.sqrt(x[0]**2 + x[1]**2), reverse=True)
+        for j, feature in enumerate(features[:max_particles]):
+            particles[i, j] = feature
     
     return particles
 
-def build_input(particles, max_particles=13):
+def build_input(particles, max_particles, n_channels):
     """Build model input and mask from -99-padded data"""
     n_events = particles.shape[0]
-    x = np.full((n_events, max_particles, 6), -99.0)  # Initialize with -99
+    x = np.full((n_events, max_particles, n_channels), -99.0)  # Initialize with -99
     src_mask = np.zeros((n_events, max_particles), dtype=bool)
     
     for i in range(max_particles):
@@ -76,25 +93,55 @@ def build_input(particles, max_particles=13):
     print(f"Data stats - Real particles: {src_mask.mean():.1%}")
     return x, src_mask
 
-def prepare_particle_data(signal_pkl_path, background_pkl_path, test_ratio=0.2, max_particles=13):
-    """Main data preparation pipeline"""
-    # Load data
-    df_signal = pd.read_pickle(signal_pkl_path)
-    df_background = pd.read_pickle(background_pkl_path)
+def prepare_particle_data(signal_path, background_path,  max_particles, test_ratio, max_events, n_channels):
+    
+    df_signal = pd.read_hdf(signal_path, key='data')
+    df_background = pd.read_hdf(background_path, key='data')
+    
+    #------------------------------------------max events--------------------------------------------
+    
+    if max_events > 0:
+        # Randomly sample events while maintaining the DataFrame structure
+        df_signal = df_signal.sample(n=min(max_events, len(df_signal)), random_state=42, replace=False)
+        df_background = df_background.sample(n=min(max_events, len(df_background)), random_state=42, replace=False)
+        
+        # Reset index to maintain continuous integer indexing
+        df_signal = df_signal.reset_index(drop=True)
+        df_background = df_background.reset_index(drop=True)
+    
+    #------------------------------------------------------------------------------------------------
     
     # Process particles (preserving -99 padding)
-    signal_particles = select_particles(df_signal, max_particles)
-    background_particles = select_particles(df_background, max_particles)
+    signal_particles = select_particles(df_signal, max_particles, n_channels)
+    background_particles = select_particles(df_background, max_particles, n_channels)
     
     # Build inputs and masks
-    signal_x, signal_mask = build_input(signal_particles, max_particles)
-    background_x, background_mask = build_input(background_particles, max_particles)
+    signal_x, signal_mask = build_input(signal_particles, max_particles, n_channels)
+    background_x, background_mask = build_input(background_particles, max_particles, n_channels)
     
     # Combine and shuffle
     x = np.concatenate([signal_x, background_x])
     mask = np.concatenate([signal_mask, background_mask])
     y = np.concatenate([np.ones(len(signal_x)), np.zeros(len(background_x))])
     x, mask, y = shuffle(x, mask, y, random_state=42)
+    
+    # Scale only real particles (not -99 padding)
+    # Create numpy array copies explicitly
+    x_np = np.array(x) if not isinstance(x, np.ndarray) else x.copy()
+    mask_np = np.array(mask) if not isinstance(mask, np.ndarray) else mask.copy()
+    
+    # # Get indices of real particles
+    # real_indices = np.where(mask_np)
+    
+    # # Extract real particles for scaling
+    # real_particles = x_np[real_indices]
+    
+    # if len(real_particles) > 0:
+    #     print("yes, scaling now")
+    #     # Initialize and fit scaler
+    #     scaler = StandardScaler()
+    #     scaled_particles = scaler.fit_transform(real_particles)
+    #     x_np[real_indices] = scaled_particles
     
     # Train-test split
     x_train, x_test, mask_train, mask_test, y_train, y_test = train_test_split(
@@ -104,20 +151,21 @@ def prepare_particle_data(signal_pkl_path, background_pkl_path, test_ratio=0.2, 
     def to_tensor(array, dtype):
         return torch.as_tensor(array, dtype=dtype)
     
-    return (
-        to_tensor(x_train, torch.float32),
-        to_tensor(x_test, torch.float32),
-        to_tensor(mask_train, torch.bool),
-        to_tensor(mask_test, torch.bool),
-        to_tensor(y_train, torch.float32).unsqueeze(1),
-        to_tensor(y_test, torch.float32).unsqueeze(1)
-    )
+    return  (
+                to_tensor(x_train, torch.float32),
+                to_tensor(x_test, torch.float32),
+                to_tensor(mask_train, torch.bool),
+                to_tensor(mask_test, torch.bool),
+                to_tensor(y_train, torch.float32).unsqueeze(1),
+                to_tensor(y_test, torch.float32).unsqueeze(1)
+            )
 
 def plot_training_loss_curve(train_losses, val_losses):
+    
     plt.figure(figsize=(8, 6))
     
-    plt.plot(train_losses, label='Training Loss', linewidth=2)
-    plt.plot(val_losses, label='Validation Loss', linewidth=2)
+    plt.plot(train_losses, label='Training Loss', linewidth=2, color='r')
+    plt.plot(val_losses, label='Validation Loss', linewidth=2, color='b')
     
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
@@ -144,18 +192,17 @@ def plot_score_distribution(y_true, y_pred):
     })
     score_df.to_csv("results/score_distribution_data.csv", index=False)
     
-    plt.hist(y_pred[y_true == 1], bins=50, alpha=0.5, label='Signal', density=False, histtype="step")
-    plt.hist(y_pred[y_true == 0], bins=50, alpha=0.5, label='Background', density=False, histtype="step")
+    plt.hist(y_pred[y_true == 1], bins=50, alpha=0.5, label='Signal', density=True, histtype="step", color='r')
+    plt.hist(y_pred[y_true == 0], bins=50, alpha=0.5, label='Background', density=True, histtype="step", color='b')
     
     plt.xlabel('Predicted Score')
-    plt.ylabel('Normalized Counts')
+    plt.ylabel('Normalised counts')
     plt.legend()
-    plt.savefig("results/counts_vs_predicted_score.png", dpi=300)
+    plt.savefig("results/normalised_counts_vs_predicted_score.png", dpi=300)
     plt.close()
 
 def plot_roc_curve(y_true, y_pred):
     """Plot ROC curve"""
-    from sklearn.metrics import roc_curve, auc
     
     # Convert tensors to numpy if needed
     if torch.is_tensor(y_true):
@@ -174,7 +221,7 @@ def plot_roc_curve(y_true, y_pred):
     roc_df.to_csv("results/roc_curve_data.csv", index=False)
     
     plt.figure(figsize=(8, 6))
-    plt.plot(fpr, tpr, label=f'ROC curve (AUC = {roc_auc:.3f})')
+    plt.plot(fpr, tpr, label=f'ROC curve (AUC = {roc_auc:.3f})', color='b')
     plt.plot([0, 1], [0, 1], 'k--')
     plt.xlim([0.0, 1.0])
     plt.ylim([0.0, 1.0])
@@ -183,10 +230,40 @@ def plot_roc_curve(y_true, y_pred):
     plt.legend(loc="lower right")
     plt.savefig("results/ROC_curve.png", dpi=300)
     plt.close()
+
+def plot_feature_attention(x_input, attention_weights, save_path=None):
     
+    feature_names = ["log_pt", "eta", "phi", "elog_nergy"]
+    
+    # Convert to numpy
+    x_input = x_input.cpu().numpy() if torch.is_tensor(x_input) else x_input
+    attention_weights = attention_weights.cpu().numpy() if torch.is_tensor(attention_weights) else attention_weights
+    
+    # Mask out padded particles (where px = -99)
+    mask = (x_input[:, :, 0] != -99)  # Assuming px is the first feature
+    x_input_masked = x_input[mask]
+    attention_masked = attention_weights[mask]
+
+    # # Normalize attention weights per event
+    # attention_masked = attention_masked / (attention_masked.sum(axis=1, keepdims=True) + 1e-8)
+    
+    # Compute weighted feature importance
+    feature_importance = np.abs(x_input_masked) * attention_masked[:, np.newaxis]
+    avg_feature_importance = feature_importance.mean(axis=0)
+    
+    # Plot
+    plt.figure(figsize=(10, 6))
+    plt.bar(feature_names, avg_feature_importance)
+    plt.xlabel("Feature")
+    plt.ylabel("Average Attention Contribution")
+    plt.xticks(rotation=45)
+    
+    if save_path:
+        plt.savefig(save_path, bbox_inches="tight", dpi=300)
+    plt.close()
+
+# attention weights for particles
 def plot_attention_weights(particles, weights, save_path=None):
-    """Simple attention visualization"""
-    import matplotlib.pyplot as plt
     
     # If weights are 3D (batch × particles × heads), average over heads
     if weights.ndim == 3:
@@ -202,10 +279,8 @@ def plot_attention_weights(particles, weights, save_path=None):
         plt.savefig(save_path)
     plt.close()
 
-def analyze_kinematics_after_cuts(results, score_cut=0.5):
+def analyze_kinematics_after_cuts(results, n_channels, score_cut=0.05):
     """Analyze kinematics for events passing score cut"""
-    import matplotlib.pyplot as plt
-    import pandas as pd
     
     # Extract data
     y_true = results['y_true']
@@ -216,20 +291,22 @@ def analyze_kinematics_after_cuts(results, score_cut=0.5):
     analysis_df = pd.DataFrame({
         'is_signal': y_true,
         'pred_score': y_pred,
-        'passes_cut': y_pred > score_cut
+        'passes_cut': y_pred < score_cut # now less than 0.05
     })
     
     # Convert Cartesian back to polar coordinates for analysis
     def cartesian_to_polar(features):
-        px, py, pz, energy, is_bjet, is_jet = features
-        if px == -99:  # Padding
-            return np.nan, np.nan, np.nan, np.nan
         
-        pt = np.sqrt(px**2 + py**2)
-        eta = np.arcsinh(pz/pt) if pt > 0 else 0
-        phi = np.arctan2(py, px)
-        mass = np.sqrt(energy**2 - (px**2 + py**2 + pz**2)) if energy**2 > (px**2 + py**2 + pz**2) else 0
-        return pt, eta, phi, mass
+        log_pt, eta, phi, log_energy = features
+        
+        # if pt == -99:  # Padding
+        #     return np.nan, np.nan, np.nan, np.nan
+        
+        # pt = np.sqrt(px**2 + py**2)
+        # eta = np.arcsinh(pz/pt) if pt > 0 else 0
+        # phi = np.arctan2(py, px)
+        # mass = np.sqrt(np.abs(energy**2 - (px**2 + py**2 + pz**2))) 
+        return log_pt, eta, phi, log_energy
     
     # Analyze leading particle (highest pT) in each event
     leading_particles = []
@@ -237,33 +314,37 @@ def analyze_kinematics_after_cuts(results, score_cut=0.5):
         # Find leading particle (first non-padded particle)
         for particle in event:
             if particle[0] != -99:  # Not padded
-                pt, eta, phi, mass = cartesian_to_polar(particle)
-                leading_particles.append([pt, eta, phi, mass])
+                log_pt, eta, phi, log_energy = cartesian_to_polar(particle)
+                leading_particles.append([log_pt, eta, phi, log_energy])
                 break
         else:
-            leading_particles.append([np.nan]*4)  # All padded
+            leading_particles.append([np.nan]*n_channels)  # All padded
     
     # Add leading particle info to DataFrame
-    analysis_df[['lead_pt', 'lead_eta', 'lead_phi', 'lead_mass']] = leading_particles
+    analysis_df[['lead_log_pt', 'lead_eta', 'lead_phi', 'lead__logenergy']] = leading_particles
     
     # Plot kinematics distributions
     os.makedirs("results/kinematics", exist_ok=True)
     
-    for var in ['lead_pt', 'lead_eta', 'lead_phi', 'lead_mass']:
+    for var in ['lead_log_pt', 'lead_eta', 'lead_phi', 'lead_log_energy']:
         plt.figure(figsize=(10, 6))
         
         # Plot signal vs background for events passing cut
         for label, mask in [('Signal', analysis_df['is_signal'] == 1),
                             ('Background', analysis_df['is_signal'] == 0)]:
-            data = analysis_df.loc[mask & (analysis_df['passes_cut']), var]
-            plt.hist(data, bins=50, alpha=0.5, label=label, density=True)
+            data = analysis_df.loc[mask & (analysis_df['passes_cut']), var].dropna()  # Drop NaN values
+            if len(data) > 0:  # Only plot if we have data
+                plt.hist(data, bins=50, alpha=0.5, label=label, density=True, color='r' if label == 'Signal' else 'b')
         
-        plt.xlabel(var)
-        plt.ylabel('Normalized Counts')
-        plt.title(f'{var} distribution after score cut > {score_cut}')
-        plt.legend()
-        plt.savefig(f"results/kinematics/{var}_after_cut.png")
-        plt.close()
+        if len(plt.gca().patches) > 0:  # Only save if we plotted something
+            plt.xlabel(var)
+            plt.ylabel('Normalised counts')
+            plt.title(f'{var} distribution after score cut < {score_cut}')
+            plt.legend()
+            plt.savefig(f"results/kinematics/{var}_after_cut.png")
+            plt.close()
+        else:
+            print(f"No data to plot for {var} with cut {score_cut}")
     
     # Save analysis results
     analysis_df.to_csv("results/kinematics/kinematic_analysis.csv", index=False)
