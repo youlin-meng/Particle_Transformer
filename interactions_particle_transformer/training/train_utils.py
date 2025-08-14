@@ -12,7 +12,7 @@ def save_datasets(train_dataset, val_dataset, test_dataset, path="datasets"):
 def load_datasets(path="datasets", batch_size=2048, num_workers=8, prefetch_factor=4):
     
     torch.serialization.add_safe_globals([TensorDataset])
-    
+
     train_dataset = torch.load(os.path.join(path, "train_dataset.pt"))
     val_dataset = torch.load(os.path.join(path, "val_dataset.pt"))
     test_dataset = torch.load(os.path.join(path, "test_dataset.pt"))
@@ -56,24 +56,19 @@ def evaluate_model(model, test_loader):
     device = next(model.parameters()).device
     
     all_outputs, all_targets, all_inputs = [], [], []
-    all_attention = []
     
     with torch.no_grad():
-        for x_batch, mask_batch, y_batch in test_loader:
+        for x_batch, u_batch, mask_batch, y_batch in test_loader:
             x_batch = x_batch.to(device, non_blocking=True)
+            u_batch = u_batch.to(device, non_blocking=True)
             mask_batch = mask_batch.to(device, non_blocking=True)
             y_batch = y_batch.to(device, non_blocking=True)
             
-            outputs, attention = model(x_batch, mask_batch)
+            outputs, _ = model(x_batch, u_batch, mask_batch)
             
             all_outputs.append(outputs.cpu())
             all_targets.append(y_batch.cpu())
             all_inputs.append(x_batch.cpu())
-            
-            if attention is not None:
-                all_attention.append({
-                    k: v.cpu() for k, v in attention.items()
-                })
     
     y_true = torch.cat(all_targets).numpy().flatten()
     y_pred_logits = torch.cat(all_outputs).numpy().flatten()
@@ -81,19 +76,20 @@ def evaluate_model(model, test_loader):
     
     accuracy = np.mean((y_pred_proba > 0.5).astype(int) == y_true)
     
-    if all_attention:
-        combined_attention = {
-            k: torch.cat([d[k] for d in all_attention]).numpy()
-            for k in all_attention[0].keys()
-        }
-    
-    result = {
+    return {
         'y_true': y_true,
         'y_pred': y_pred_proba,
         'y_pred_logits': y_pred_logits,
         'x_input': torch.cat(all_inputs).numpy(),
-        'accuracy': accuracy,
-        'attention': combined_attention
+        'accuracy': accuracy
     }
-        
-    return result
+
+def save_model(model, config, metrics, path="results/model.pth"):
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'config': config,
+        'train_losses': metrics['train_losses'],
+        'val_losses': metrics['val_losses'],
+        'train_accs': metrics['train_accs'],
+        'val_accs': metrics['val_accs']
+    }, path)

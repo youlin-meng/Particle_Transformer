@@ -53,10 +53,10 @@ class ParticleTransformer(nn.Module):
         
         attn_weights = None
         for i, transformer in enumerate(self.transformers):
-            if i == len(self.transformers) - 1:
-                x, attn_weights = transformer(x, extended_key_padding_mask)
-            else:
-                x = transformer(x, extended_key_padding_mask)
+                if i == len(self.transformers) - 1:
+                    x, attn_weights = transformer(x, extended_key_padding_mask)
+                else:
+                    x = transformer(x, extended_key_padding_mask)
         
         cls_output = x[:, 0]
         logits = self.classifier(cls_output)

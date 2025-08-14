@@ -13,9 +13,9 @@ from data.visualization import (
     plot_roc_curve,
     plot_attention_weights
 )
-from utils.helpers import create_model, save_model
-from training.trainer import ParticleClassifierTrainer
-from training.train_utils import save_datasets, load_datasets, evaluate_model
+from utils.helpers import create_model
+from training.trainer import ParticleTrainer
+from training.train_utils import save_model, evaluate_model, load_datasets
 
 def main():
     config = DEFAULT_CONFIG.copy()
@@ -35,75 +35,76 @@ def main():
         train_dataset = torch.load(os.path.join("datasets", "train_dataset.pt"))
         y_train = train_dataset.tensors[2].cpu() if train_dataset.tensors[2].is_cuda else train_dataset.tensors[2]
     else:
-        print("Preparing new datasets...")
+        # Prepare data
+        print("Preparing datasets...")
         data = prepare_particle_data(
             config['signal_path'],
             config['background_path'],
             max_particles=config['max_particles'],
             test_ratio=config['test_ratio'],
             max_events=config['max_events'],
-            n_channels=config['n_channels']
+            n_channels=config['n_channels'],
+            pairwise_channels=config['pairwise_channels']
         )
         
-        train_dataset = TensorDataset(data[0], data[3], data[6])
-        val_dataset = TensorDataset(data[1], data[4], data[7])
-        test_dataset = TensorDataset(data[2], data[5], data[8])
-        y_train = data[6]
-        
-        if config.get('SAVE_DATASETS', True):
-            save_datasets(train_dataset, val_dataset, test_dataset)
+        train_dataset = TensorDataset(data[0], data[3], data[6], data[9])
+        val_dataset = TensorDataset(data[1], data[4], data[7], data[10])
+        test_dataset = TensorDataset(data[2], data[5], data[8], data[11])
         
         train_loader = DataLoader(
             train_dataset,
             batch_size=config['batch_size'],
             shuffle=True,
-            num_workers=config['num_workers']
+            num_workers=config['num_workers'],
+            pin_memory=True
         )
         
         val_loader = DataLoader(
             val_dataset,
             batch_size=config['batch_size'],
             shuffle=False,
-            num_workers=config['num_workers']
+            num_workers=config['num_workers'],
+            pin_memory=True
         )
         
         test_loader = DataLoader(
             test_dataset,
             batch_size=config['batch_size'],
             shuffle=False,
-            num_workers=config['num_workers']
+            num_workers=config['num_workers'],
+            pin_memory=True
         )
     
-    # Compute class weights
-    y_train_np = y_train.numpy().flatten()
-    num_signal = np.sum(y_train_np == 1)
-    num_background = np.sum(y_train_np == 0)
+    y_train = data[9].numpy().flatten()
+    num_signal = np.sum(y_train == 1)
+    num_background = np.sum(y_train == 0)
     pos_weight = torch.tensor([num_background / num_signal], device=device)
+    config['pos_weight'] = pos_weight
     
     print(f"Signal events: {num_signal}, Background events: {num_background}, pos_weight: {pos_weight.item()}")
     
     # Create model
-    config['pos_weight'] = pos_weight
     model = create_model(config)
-    
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs!")
         model = DataParallel(model)
     model = model.to(device)
     
+    # Print model info
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
     
     # Train model
-    trainer = ParticleClassifierTrainer(model, train_loader, val_loader, config)
+    print("Starting training...")
     start_time = time.time()
     
+    trainer = ParticleTrainer(model, train_loader, val_loader, config)
     results = trainer.train(
         epochs=config['epochs'],
         patience=config['patience']
     )
     
-    # Evaluate and save results
+    # Evaluate on test set
     test_results = evaluate_model(model, test_loader)
     print(f"\nTest Accuracy: {test_results['accuracy']:.3f}")
     
@@ -112,17 +113,14 @@ def main():
         results['train_losses'], 
         results['val_losses']
     )
+    
     plot_score_distribution(test_results['y_true'], test_results['y_pred'])
     plot_roc_curve(test_results['y_true'], test_results['y_pred'])
-    # Could also visualize full/cls attention if needed
-  
+    
     save_model(
         model.module if isinstance(model, DataParallel) else model,
         config,
-        results['train_losses'],
-        results['val_losses'],
-        results['train_accs'],
-        results['val_accs']
+        results
     )
     
     print(f"Training completed in {(time.time() - start_time)/3600:.2f} hours")

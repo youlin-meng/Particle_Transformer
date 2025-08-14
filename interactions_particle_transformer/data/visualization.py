@@ -1,10 +1,10 @@
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
 import pandas as pd
-import os
-import torch
 import numpy as np
+import torch
 from sklearn.metrics import roc_curve, auc
+import os
+from matplotlib.patches import Patch
 import seaborn as sns
 
 def plot_training_metrics(train_losses, val_losses, train_accs=None, val_accs=None):
@@ -36,24 +36,20 @@ def plot_training_metrics(train_losses, val_losses, train_accs=None, val_accs=No
     plt.savefig("results/training_metrics.png", dpi=300)
     plt.close()
 
-
 def plot_score_distribution(y_true, y_pred):
-    plt.figure(figsize=(10, 6))
-    
     if torch.is_tensor(y_true):
         y_true = y_true.cpu().numpy().flatten()
     if torch.is_tensor(y_pred):
         y_pred = y_pred.cpu().numpy().flatten()
         
+    plt.figure(figsize=(10, 6))
     plt.hist(y_pred[y_true == 1], bins=50, alpha=0.5, label='Signal', density=True, histtype="step")
     plt.hist(y_pred[y_true == 0], bins=50, alpha=0.5, label='Background', density=True, histtype="step")
-    
     plt.xlabel('Predicted Score')
     plt.ylabel('Normalised counts')
     plt.legend()
     plt.savefig("results/score_distribution.png", dpi=300)
     plt.close()
-
 
 def plot_roc_curve(y_true, y_pred, save_path="results/roc_curve.png"):
     if torch.is_tensor(y_true):
@@ -81,7 +77,6 @@ def plot_roc_curve(y_true, y_pred, save_path="results/roc_curve.png"):
     if not os.path.exists(save_path):
         raise RuntimeError(f"Failed to save ROC curve at {save_path}")
 
-# CLS to particle attention visualization
 def plot_attention_weights(particles, weights, save_path=None):
     if weights.ndim == 3:
         weights = weights.mean(axis=1)
@@ -107,6 +102,27 @@ def plot_attention_weights(particles, weights, save_path=None):
             Patch(facecolor='purple', label='Muon')
         ]
         ax.legend(handles=legend_elements)
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300)
+        plt.close()
+
+def plot_attention_heatmap(particles, attention, save_path=None):
+    if attention.ndim == 3:
+        attention = attention.mean(axis=1)
+    
+    plt.figure(figsize=(10, 8))
+    
+    for i in range(min(5, len(particles))):
+        ax = plt.subplot(2, 3, i+1)
+        real_mask = particles[i,:,0] != -99
+        real_attention = attention[i][real_mask][:, real_mask]
+        
+        sns.heatmap(real_attention, cmap='viridis', cbar=True, ax=ax)
+        ax.set_title(f"Event {i+1}")
+        ax.set_xlabel("Particle Index")
+        ax.set_ylabel("Particle Index")
     
     plt.tight_layout()
     if save_path:
